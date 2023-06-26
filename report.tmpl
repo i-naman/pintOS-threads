@@ -1,0 +1,538 @@
+			+--------------------+
+			|        CSE 521      |
+			| PROJECT 1: THREADS |
+			|   DESIGN DOCUMENT  |
+			+--------------------+
+				   
+---- GROUP ----
+
+Venkata Hemanth Athota <vathota@buffalo.edu>
+Naman Agrawal <namanagr@buffalo.edu>
+Hrushikesh Poola <hpoola@buffalo.edu
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+			     ALARM CLOCK
+			     ===========
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+------------
+			static struct list waiting_list  // create a list to store the threads in waiting_state in ascending order
+
+			struct priority_props {  // end time of sleep of current thread
+				int64_t ticks_to_wakeup;
+			} 
+--------------
+
+---- ALGORITHMS ----
+
+>> A2: Briefly describe what happens in a call to timer_sleep(),
+>> including the effects of the timer interrupt handler.
+	---------
+		timer_sleep(int64_t ticks)
+			check for ticks:
+				if ticks < 0:
+					then we need to ignore the thread as current time is less than ticks time
+				else :
+					- Instead of thread_yield() as busy wait, add the thread to block list
+					- update the ticks_to_wakeup added in struct thread with the ticks parameter of timer_sleep()
+					- update status of the thread to THREAD_BLOCKED(2)
+					- all the threads are added to all_list with status as THREAD_BLOCKED(2)
+	---------
+>> A3: What steps are taken to minimize the amount of time spent in
+>> the timer interrupt handler?
+--------
+
+	- timer_interrupt for each timer tick , we are checking the all_list and check for THREAD_BLOCKED,
+	and check if ticks are up to the current timer ticks so as to unblock the thread.
+	- so, the threads with ticks_to_wakeup same as timer ticks (OS), will update the thread status to 
+	THREAD_READY, and add current thread to ready_list
+
+--------
+---- SYNCHRONIZATION ----
+
+>> A4: How are race conditions avoided when multiple threads call
+>> timer_sleep() simultaneously?
+---------
+	Interrupt handlers cannot sleep, they cannot acquire locks. This means data shared between kernel threads and interrupt handlers must be protected with a kernel thread by turning off interrupts.
+---------
+>> A5: How are race conditions avoided when a timer interrupt occurs
+>> during a call to timer_sleep()?
+------
+	Interrupts are disabled to handle race condition
+------
+---- RATIONALE ----
+>> A6: Why did you choose this design?  In what ways is it superior to
+>> another design you considered?
+---------
+	- we used this design to avoid thread_yield() in a infinte while loop (causes busy-waiting)
+		busy waiting needs to be avoided so we used existing list to keep track of threads moving from running to blocked state.
+	- all_list can be maintaned easily as we don't need to update the new list created at every case.
+	- downside to this approach is that we iterate over the all_list every time to decrement the ticks of all the blocked threads
+
+	- Initially we planned to do using a new list to store all the blocked threads and change the status of those threads based on 
+		tick times and set to ready state. but it is hard to maintain a seperate list for storing blocked threads and on status change
+		the list need to be updated again. so instead of that we tried to change the status of the thread and check for only blocked threads
+		in all_list
+---------
+
+
+			 PRIORITY SCHEDULING
+			 ===================
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+-------
+	// struct thread  --> thread.c
+	struct priority_props 
+	{
+		int64_t ticks_to_wakeup;
+		struct list locks_acquired;
+		struct lock *lock_waiting;
+		int priority;
+	}
+	- int priority // This will keep track of the base priority of the thread
+	- int ticks_to_wakeup // ticks for unblock
+	- struct list lock_acquired // This will store the list of the locks acquired by the current thread. THis will be used to handle priority donations.
+	- struct lock* lock_waiting // This will store pointer to the lock current thread is trying to acquire.
+
+	// struct lock
+	1. struct list_elem elem; // This will store the list_elem of the thread
+	2. int priority // maximum priority of the thread that is waiting for the lock to be held.
+-------
+>> B2: Explain the data structure used to track priority donation.
+>> Use ASCII art to diagram a nested donation.  (Alternately, submit a
+>> .png file.)
+-------
+we use the above declared variables to keep track of nested priorities as shown in the following example
+
+priority donation example
+1. L Thread - priorty l and has lock L1
+2. M Thread - priority m and has lock L2 and trying to acquire L1
+3. H thread - priority h and trying to acquire L2
+
+priority order : l < m < h 
+
+.---------------------------------------------------.
+|                Thread L                           |
++-------------------+-------------------------------+
+| member            | value                         |
++-------------------+-------------------------------+
+| priority  		|                            l  |
+|---------------------------------------------------|
+|________________priority_props_____________________|
+| priority		    |                            l  |
+| lock_acquired     | {L1 (priority_lock = -1)} 	|
+| lock_blocked_by   | NULL                          |
+'-------------------+-------------------------------'
+
+.---------------------------------------------------.
+|                Thread M                           |
++-------------------+-------------------------------+
+| member            | value                         |
++-------------------+-------------------------------+
+| priority          |                            m  |
+|---------------------------------------------------|
+|________________priority_props_____________________|
+| priority 		    |                            m  |
+| lock_acquired     | {L2 (priority_lock = -1)} 	|
+| lock_blocked_by   | NULL                          |
+'-------------------+-------------------------------'
+
+.---------------------------.
+|    Thread H               |
++-------------------+-------+
+| member            | value |
++-------------------+-------+
+| priority          |    h  |
+|___________________________|
+|____priority_props_________|
+| priority 		    |    h  |
+| lock_acquired     | {}    |
+| lock_blocked_by   | NULL  |
+'-------------------+-------'
+
+2. Now, Thread M tries to acquire L1
+
+.---------------------------------------------------.
+|                Thread L 			                |
++-------------------+-------------------------------+
+| member            | value                         |
++-------------------+-------------------------------+
+| priority  		|                            l  |
+|---------------------------------------------------|
+|________________priority_props_____________________|
+| priority			|                            m  |
+| lock_acquired     | {L1 (priority_lock = m)} 	    |
+| lock_blocked_by   | NULL                          |
+'-------------------+-------------------------------'
+.---------------------------------------------------.
+|                Thread M 			                |
++-------------------+-------------------------------+
+| member            | value                         |
++-------------------+-------------------------------+
+| priority          |                            m  |
+|---------------------------------------------------|
+|________________priority_props_____________________|
+| priority			|                            m  |
+| lock_acquired     | {L2 (priority_lock = -1)} 	|
+| lock_blocked_by   | address of L1                 |
+'-------------------+-------------------------------'
+.---------------------------.
+|    Thread H 			    |
++-------------------+-------+
+| member            | value |
++-------------------+-------+
+| priority          |    h  |
+|---------------------------|
+|______priority_props_______|
+| priority			|    h  |
+| lock_acquired     | {}    |
+| lock_blocked_by   | NULL  |
+'-------------------+-------'
+
+3. Lock H wants to acquire L2
+
+.---------------------------------------------------.
+|                Thread L 			                |
++-------------------+-------------------------------+
+| member            | value                         |
++-------------------+-------------------------------+
+| priority  		|                            l  |
+|---------------------------------------------------|
+|________________priority_props_____________________|
+| priority			|                            h  |
+| lock_acquired     | {L1 (priority_lock = h)} 	    |
+| lock_blocked_by   | NULL                          |
+'-------------------+-------------------------------'
+.---------------------------------------------------.
+|                Thread M 			                |
++-------------------+-------------------------------+
+| member            | value                         |
++-------------------+-------------------------------+
+| priority          |                            m  |
+|---------------------------------------------------|
+|________________priority_props_____________________|
+| priority			|                            h  |
+| lock_acquired     | {L2 (priority_lock = h)} 	    |
+| lock_blocked_by   | address of L1                 |
+'-------------------+-------------------------------'
+.------------------------------------.
+|    Thread H 			    		 |
++-------------------+----------------+
+| member            | value 		 |
++-------------------+----------------+
+| priority          |    h  		 |
+|------------------------------------|
+|___________priority_props___________|
+| priority			|    h           |
+| lock_acquired     | {}    		 |
+| lock_blocked_by   | address of L2  |
+'-------------------+----------------+
+
+4. Thread L release L1
+
+.---------------------------------------------------.
+|                Thread L 			                |
++-------------------+-------------------------------+
+| member            | value                         |
++-------------------+-------------------------------+
+| priority  		|                            l  |
+|---------------------------------------------------|
+|________________priority_props_____________________|
+| priority			|                            l  |
+| lock_acquired     | {} 	    					|
+| lock_blocked_by   | NULL                          |
+'-------------------+-------------------------------'
+.---------------------------------------------------.
+|                Thread M 			                |
++-------------------+-------------------------------+
+| member            | value                         |
++-------------------+-------------------------------+
+| priority          |                            m  |
+|---------------------------------------------------|
+|________________priority_props_____________________|
+| priority			|                            h  |
+| lock_acquired     | {L1{priority_lock = m}		|
+|					|	L2 (priority_lock = h)}		|
+| lock_blocked_by   | 		NULL	                |
+'-------------------+-------------------------------'
+.------------------------------------.
+|    Thread H 			    		 |
++-------------------+----------------+
+| member            | value 		 |
++-------------------+----------------+
+| priority          |    h  		 |
+|------------------------------------|
+|__________priority_props____________|
+| priority			|    h           |
+| lock_acquired     | {}    		 |
+| lock_blocked_by   | address of L2  |
+'-------------------+----------------+
+
+5. Lock M release L2
+
+.---------------------------------------------------.
+|                Thread L 			                |
++-------------------+-------------------------------+
+| member            | value                         |
++-------------------+-------------------------------+
+| priority  		|                            l  |
+|---------------------------------------------------|
+|________________priority_props_____________________|
+| priority			|                            l  |
+| lock_acquired     | {} 	    					|
+| lock_blocked_by   | NULL                          |
+'-------------------+-------------------------------'
+.---------------------------------------------------.
+|                Thread M 			                |
++-------------------+-------------------------------+
+| member            | value                         |
++-------------------+-------------------------------+
+| priority          |                            m  |
+|---------------------------------------------------|
+|________________priority_props_____________________|
+| priority			|                            m  |
+| lock_acquired     | {L1 (priority_lock = m)}		|
+| lock_blocked_by   | 		NULL	                |
+'-------------------+-------------------------------'
+.--------------------------------------------------------.
+|    Thread H 			    		 					 |
++-------------------+------------------------------------+
+| member            | value 		 					 |
++-------------------+------------------------------------+
+| priority          |    h  		 					 |
+|--------------------------------------------------------|
+|________________priority_props__________________________|
+| priority_original |    h           					 |
+| lock_acquired     | {L1 (priority_lock = h)}    		 |
+| lock_blocked_by   | NULL  							 |
+'-------------------+------------------------------------+
+
+-------
+---- ALGORITHMS ----
+
+>> B3: How do you ensure that the highest priority thread waiting for
+>> a lock, semaphore, or condition variable wakes up first?
+
+-----------
+	The order of insertion in the wait list of semaphore is sorted from highest priority to lowest priority. 
+	So this will ensure the order of threads in ready list( based on priorities) as each time on sema_up 
+	the top element from the wait list is picked and set to run.
+-----------
+
+>> B4: Describe the sequence of events when a call to lock_acquire()
+>> causes a priority donation.  How is nested donation handled?
+---------
+	Check if Lock is not acquired by any thread
+		True:
+			check for lock semaphore:
+				- sema_down():
+				- if no other thread then acquire lock and add holder of lock to current thread
+		False:
+			- set thread's priority_props.lock_waiting to the current lock
+			- if the priority of the current thread is greater than the priority of the thread that held the lock
+			then donate the current threads priority to the lock holder thread
+			- do this donation recusively based on the locks hold by threads with lower priority that current thread
+
+
+
+---------
+>> B5: Describe the sequence of events when lock_release() is called
+>> on a lock that a higher-priority thread is waiting for.
+-----------
+	- release the lock from the current thread and change the update the priority of 
+	the current thread based on the locks acquired by the current thread.
+	- and change the lock holder to NULL
+
+	- the wait list in the lock semaphore is maintained based on the priority.
+	  so, once the lock is released and sema_up is called the highest priority thread is given chance
+	  to pick the lock.
+-----------
+---- SYNCHRONIZATION ----
+
+>> B6: Describe a potential race in thread_set_priority() and explain
+>> how your implementation avoids it.  Can you use a lock to avoid
+>> this race?
+--------
+	As changing priority of a thread is atomic operation we need to disable the interrupts while changing the priority of the thread.
+--------
+---- RATIONALE ----
+
+>> B7: Why did you choose this design?  In what ways is it superior to
+>> another design you considered?
+----------
+	This design is articulate because we keep track of the nested tree structure during priority donation, and 
+	once thread is set with updated priority , we call thread_yield() and try to schedule the thread with higher priority
+	and we change priority in thread level property only when there are either no locks acquired by the thread or old priority
+	of the thread is higher than the new thread, and put back to ready list and schedule again.  
+----------
+			  ADVANCED SCHEDULER
+			  ==================
+
+---- DATA STRUCTURES ----
+
+>> C1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+----------
+	// struct thread -> thread.c
+		struct mlfq_props
+		{
+			int nice;       // This is the nice value of the thread
+			int recent_cpu; // This stores the last cpu time the thread got
+		};
+
+----------
+---- ALGORITHMS ----
+
+>> C2: Suppose threads A, B, and C have nice values 0, 1, and 2.  Each
+>> has a recent_cpu value of 0.  Fill in the table below showing the
+>> scheduling decision and the priority and recent_cpu values for each
+>> thread after each given number of timer ticks:
+
+timer  recent_cpu    priority   thread
+ticks   A   B   C   A   B   C   to run
+-----  --  --  --  --  --  --   ------
+ 0		0	1	2	63	61	59	A
+ 4		4	1	2	62	61	59	A
+ 8		7	2	4	61	61	58	B
+12		6	6	6	61	59	58	A
+16		9	6	7	60	59	57	A
+20		12	6	8	60	59	57	A
+24		15	6	9	59	59	57	B
+28		14	10	10	59	58	57	A
+32		16	10	11	58	58	56	B
+36		15	14	12	59	57	56	A
+
+>> C3: Did any ambiguities in the scheduler specification make values
+>> in the table uncertain?  If so, what rule did you use to resolve
+>> them?  Does this match the behavior of your scheduler?
+----------
+	Yes, ambiguity arises while scheduling using the above recenet_cpu and nice values. As we don't consider the time that cpu spends on calculations for every cycle(each timer tick in table), 
+	while cpu performs these calculations in real time the current running thread needs to give up cpu. Hence, there is a mismatch between the actual time and the time we calculated.
+----------
+>> C4: How is the way you divided the cost of scheduling between code
+>> inside and outside interrupt context likely to affect performance?
+-----------
+	If we have to calculate load_avg, recenet_cpu, etc. for all threads each and every time, we will end up increasing the cpu time of a thread, which will impact the priorty value of the thread,
+	because priority value depends on cpu time and nice value.  
+-----------
+---- RATIONALE ----
+
+>> C5: Briefly critique your design, pointing out advantages and
+>> disadvantages in your design choices.  If you were to have extra
+>> time to work on this part of the project, how might you choose to
+>> refine or improve your design?
+---------
+	we have come up with an extensible design over the implementation of Priority scheduling. Instead, in real time there exists multiple queues that need to be handled simultaneously.
+	so, we maintained multiple levels in ready list and store a list with same priority and used round robin at each level so as to allocate equal time quantum of time. This technique is used while picking
+	the next thread by the scheduler.
+	Downside of this design is once a thread of a particular level is picked and assigned the cpu, it should again be added to different level and this might end up a particular level having more threads
+	which increases the time for the thread to be picked by scheduler for that particular level.
+---------
+>> C6: The assignment explains arithmetic for fixed-point math in
+>> detail, but it leaves it open to you to implement it.  Why did you
+>> decide to implement it the way you did?  If you created an
+>> abstraction layer for fixed-point math, that is, an abstract data
+>> type and/or a set of functions or macros to manipulate fixed-point
+>> numbers, why did you do so?  If not, why not?
+
+---------------
+
+	we did implement something similar to fixed point arithmetic to store the floating point numbers
+	Here is the implementation approach we followed ->
+
+
+  - x and y are fixed-point numbers,
+  - n is an integer,
+  - fixed-point numbers are in signed p.q format
+      where
+        p + q = 31,
+          and
+        f is 1 << q
+
+		f is taken as 2^16 -> 65536
+
+		Any x can be represented as (Integer part)*(2^16) + (Fraction Part). By considering this as reference
+
+		Convert n to fixed point: n*f  -> n*65536 so that the int value will be pushed to 16 bits
+		Convert x to integer (rounding toward zero): x/f -> x/65536 which will give back the integer point from fixed point number
+		Convert x to integer (rounding to nearest): (x + f / 2) / f if x >= 0, (x - f / 2) / f if x <= 0. -> similarly replace f with 65536 and made same fixed point calculations
+
+		Add x and y: x+y -> since x and y are already fixed point numbers addition of both integer part and fraction part will be ssimilar to normal addition
+		Subtract y from x: x-y -> similar to above
+
+		Add x and n: x+n *f -> now that n is integer first we need to change or shift n to fixed point number -> x + n*65536
+		Subtract n from x: x-n *f -> similar to above
+		Multiply x by y: ((int64_t) x) * y / f ->
+		Multiply x by n: x*n
+		Divide x by y: ((int64_t) x) * f / y
+		Divide x by n: x/n
+
+recent_cpu is float number -> so represented using fixed point number
+load_avg is float number -> so represented using fixed point number
+nice is a integer number -> so need to shift or multiply with 65536 while doing arithmetics with fixed point numbers
+
+
+recent_cpu = (2*load_avg)/(2*load_avg + 1) * recent_cpu + nice.
+  
+  - on each timer_tick recent_cpu will increment by one
+
+load_avg = (59/60)*load_avg + (1/60)*ready_threads.
+  It is initialized to 0 at boot and recalculated once per second
+
+priority = PRI_MAX - (recent_cpu / 4) - (nice * 2)
+
+
+The above approach is same as fixed point number representation without shift operators mentioned in the documentation, except for the shift operators
+every calculation is same as fixed point number and storing is also done the same way.
+
+(Integer part)*(2^16) + (Fraction Part) 
+	-> This is the base idea of our approach for our understanding. 
+	-> This is very similar to finding the quotient and remainder for normal decimal number.
+		-> Integer part is equivalent to quotient when divided by 65536
+		-> Fraction part is equivalent to remainder.
+
+
+---------------
+
+
+			   SURVEY QUESTIONS
+			   ================
+
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future quarters or the remaining projects?
+
+>> Any other comments?
